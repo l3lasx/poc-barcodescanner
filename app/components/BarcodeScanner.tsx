@@ -183,11 +183,11 @@ export default function BarcodeScanner({
               );
 
               // Try to enable continuous autofocus if supported
-              if (capabilities?.focusMode?.includes("continuous")) {
+              const caps = capabilities as any;
+              if (caps?.focusMode?.includes("continuous")) {
                 videoTrack.applyConstraints({
-                  // @ts-ignore - focusMode is valid but not in types
-                  focusMode: "continuous",
-                });
+                  advanced: [{ focusMode: "continuous" }],
+                } as any);
               }
             }
           }
