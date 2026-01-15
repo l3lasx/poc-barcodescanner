@@ -1,6 +1,34 @@
 @import "tailwindcss";
 
 /* Custom styles for barcode scanner */
+#scanner-container {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+}
+
+#scanner-container video,
+#scanner-container canvas {
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: cover;
+  border-radius: 0.75rem;
+}
+
+/* Quagga2 specific styles */
+#scanner-container canvas.drawingBuffer {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* iOS Safari video fixes */
+video {
+  -webkit-playsinline: true;
+  -webkit-transform: translateZ(0);
+  transform: translateZ(0);
+}
+
 #barcode-reader {
   width: 100% !important;
   border: none !important;
@@ -9,31 +37,6 @@
 #barcode-reader video {
   width: 100% !important;
   border-radius: 0.75rem;
-  /* iOS Safari fixes */
-  -webkit-transform: translateZ(0);
-  transform: translateZ(0);
-  object-fit: cover;
-}
-
-/* Force playsinline on iOS */
-video {
-  -webkit-playsinline: true;
-}
-
-#barcode-reader__scan_region {
-  background: transparent !important;
-}
-
-#barcode-reader__dashboard_section {
-  display: none !important;
-}
-
-#barcode-reader__dashboard_section_csr {
-  display: none !important;
-}
-
-#barcode-reader__dashboard_section_csr {
-  display: none !important;
 }
 
 /* Scanning animation */
