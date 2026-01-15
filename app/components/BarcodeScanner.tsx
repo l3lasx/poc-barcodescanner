@@ -113,8 +113,8 @@ export default function BarcodeScanner({
       setError(null);
 
       // Use decodeFromVideoDevice for continuous scanning
-      // Pass undefined for deviceId to use facingMode, or pass specific deviceId
-      const deviceId = isIOSDevice ? undefined : selectedCamera;
+      // Pass null for deviceId to use default camera, or pass specific deviceId
+      const deviceId = isIOSDevice ? null : selectedCamera || null;
 
       await readerRef.current.decodeFromVideoDevice(
         deviceId,
