@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from "html5-qrcode";
+import {
+  BrowserMultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType,
+} from "@zxing/library";
 
 interface BarcodeScannerProps {
   onScanSuccess: (decodedText: string, format: string) => void;
@@ -23,210 +27,206 @@ export default function BarcodeScanner({
 }: BarcodeScannerProps) {
   const [isScanning, setIsScanning] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
-  const [cameras, setCameras] = useState<{ id: string; label: string }[]>([]);
+  const [cameras, setCameras] = useState<MediaDeviceInfo[]>([]);
   const [selectedCamera, setSelectedCamera] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [debugInfo, setDebugInfo] = useState<string>("");
+  const [debugInfo, setDebugInfo] = useState<string>("Initializing...");
   const [isIOSDevice] = useState(isIOS());
-  const scannerRef = useRef<Html5Qrcode | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
 
-  // Request camera permission and get camera list
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const readerRef = useRef<BrowserMultiFormatReader | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  // Initialize reader and get cameras
   useEffect(() => {
-    requestCameraPermission();
+    initializeScanner();
+
+    return () => {
+      stopScanner();
+    };
   }, []);
 
-  const requestCameraPermission = async () => {
+  const initializeScanner = async () => {
     try {
       setDebugInfo("Requesting camera permission...");
 
-      // First request permission with ideal constraints for barcode scanning
-      const constraints: MediaStreamConstraints = {
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-      };
-
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // First request permission
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
       stream.getTracks().forEach((track) => track.stop());
 
-      setDebugInfo("Permission granted, getting cameras...");
-
       // Get camera list
-      const devices = await Html5Qrcode.getCameras();
-      if (devices && devices.length) {
-        setCameras(devices);
-        setDebugInfo(`Found ${devices.length} cameras`);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter((d) => d.kind === "videoinput");
 
-        // Prefer back camera
-        const backCamera = devices.find(
-          (d) =>
-            d.label.toLowerCase().includes("back") ||
-            d.label.toLowerCase().includes("rear") ||
-            d.label.toLowerCase().includes("environment")
-        );
-        // On iOS, usually the last camera is the back camera
-        setSelectedCamera(backCamera?.id || devices[devices.length - 1].id);
-        setHasPermission(true);
-        setError(null);
-      } else {
-        setHasPermission(false);
-        setError("No cameras found.");
+      if (videoDevices.length === 0) {
+        throw new Error("No cameras found");
       }
+
+      setCameras(videoDevices);
+      setDebugInfo(`Found ${videoDevices.length} cameras`);
+
+      // Prefer back camera
+      const backCamera = videoDevices.find(
+        (d) =>
+          d.label.toLowerCase().includes("back") ||
+          d.label.toLowerCase().includes("rear") ||
+          d.label.toLowerCase().includes("environment")
+      );
+      setSelectedCamera(
+        backCamera?.deviceId || videoDevices[videoDevices.length - 1].deviceId
+      );
+      setHasPermission(true);
     } catch (err: any) {
-      console.error("Camera permission error:", err);
+      console.error("Init error:", err);
       setHasPermission(false);
-      setError(`Camera error: ${err.message || err.name}`);
+      setError(err.message || "Failed to access camera");
       setDebugInfo(`Error: ${err.message}`);
     }
   };
 
   const startScanner = useCallback(async () => {
-    if (!selectedCamera || !containerRef.current) return;
-
-    // Cleanup existing scanner
-    if (scannerRef.current) {
-      try {
-        if (scannerRef.current.isScanning) {
-          await scannerRef.current.stop();
-        }
-        scannerRef.current.clear();
-      } catch {}
-    }
+    if (!videoRef.current) return;
 
     try {
-      setDebugInfo("Creating scanner...");
+      setDebugInfo("Starting ZXing scanner...");
 
-      const html5QrCode = new Html5Qrcode("barcode-reader", {
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.QR_CODE,
-        ],
-        verbose: true, // Enable verbose for debugging
-      });
+      // Create hints for barcode formats
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.QR_CODE,
+      ]);
+      hints.set(DecodeHintType.TRY_HARDER, true);
 
-      scannerRef.current = html5QrCode;
+      // Create reader
+      const reader = new BrowserMultiFormatReader(hints);
+      readerRef.current = reader;
 
-      setDebugInfo("Starting camera...");
-
-      // Use cameraIdOrConfig with specific constraints for iOS
-      // On iOS, we need to use facingMode constraint, not device ID
-      const cameraConfig = isIOSDevice
-        ? { facingMode: "environment" } // Use facingMode for iOS
-        : selectedCamera; // Use device ID for Android
-
-      const scanConfig = {
-        fps: 10,
-        qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-          // Dynamic qrbox that scales with screen
-          const minEdge = Math.min(viewfinderWidth, viewfinderHeight);
-          const qrboxSize = Math.floor(minEdge * 0.8);
-          return {
-            width: qrboxSize,
-            height: Math.floor(qrboxSize * 0.5), // Make it wider for barcodes
-          };
-        },
-        aspectRatio: 1.0, // Square aspect ratio works better on iOS
-        disableFlip: false,
+      // Get video constraints
+      const constraints: MediaStreamConstraints = {
+        video: isIOSDevice
+          ? {
+              facingMode: { exact: "environment" },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            }
+          : {
+              deviceId: selectedCamera ? { exact: selectedCamera } : undefined,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
       };
 
-      await html5QrCode.start(
-        cameraConfig,
-        scanConfig,
-        (decodedText, decodedResult) => {
-          const format = decodedResult.result.format?.formatName || "UNKNOWN";
-          setDebugInfo(`Scanned: ${decodedText} (${format})`);
-          onScanSuccess(decodedText, format);
-        },
-        (errorMessage) => {
-          // This is called when no barcode is found in frame - ignore
-          // Only log actual errors
-          if (!errorMessage.includes("No MultiFormat Readers")) {
-            // console.log("Scan frame:", errorMessage);
-          }
-        }
-      );
+      setDebugInfo("Getting camera stream...");
 
-      // Apply additional iOS fixes after camera starts
-      setTimeout(() => {
-        const video = document.querySelector(
-          "#barcode-reader video"
-        ) as HTMLVideoElement;
-        if (video) {
-          // Essential iOS video attributes
-          video.setAttribute("playsinline", "");
-          video.setAttribute("webkit-playsinline", "");
-          video.setAttribute("autoplay", "");
-          video.playsInline = true;
-          video.autoplay = true;
-          video.muted = true;
+      // Get stream manually for more control
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      streamRef.current = stream;
 
-          // Try to improve focus on iOS
-          if (video.srcObject && "getTracks" in video.srcObject) {
-            const stream = video.srcObject as MediaStream;
-            const videoTrack = stream.getVideoTracks()[0];
-            if (videoTrack) {
-              const capabilities = videoTrack.getCapabilities?.();
-              setDebugInfo(
-                `Video track: ${videoTrack.label}, Capabilities: ${
-                  capabilities
-                    ? JSON.stringify(Object.keys(capabilities))
-                    : "N/A"
-                }`
-              );
+      // Attach stream to video
+      const video = videoRef.current;
+      video.srcObject = stream;
+      video.setAttribute("playsinline", "true");
+      video.muted = true;
 
-              // Try to enable continuous autofocus if supported
-              const caps = capabilities as any;
-              if (caps?.focusMode?.includes("continuous")) {
-                videoTrack.applyConstraints({
-                  advanced: [{ focusMode: "continuous" }],
-                } as any);
-              }
-            }
-          }
-        }
-      }, 1000);
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        video.onloadedmetadata = () => {
+          video.play().then(resolve).catch(resolve);
+        };
+      });
 
+      setDebugInfo("Video ready, starting decode loop...");
       setIsScanning(true);
-      setError(null);
-      setDebugInfo("Scanner running - point at barcode");
+
+      // Start continuous decode
+      const decodeLoop = async () => {
+        if (
+          !readerRef.current ||
+          !videoRef.current ||
+          !streamRef.current?.active
+        ) {
+          return;
+        }
+
+        try {
+          const result = await readerRef.current.decodeOnce(videoRef.current);
+          if (result) {
+            const format =
+              BarcodeFormat[result.getBarcodeFormat()] || "UNKNOWN";
+            const text = result.getText();
+            setDebugInfo(`Scanned: ${text} (${format})`);
+            onScanSuccess(text, format);
+          }
+        } catch (err: any) {
+          // NotFoundException is normal when no barcode in frame
+          if (err.name !== "NotFoundException") {
+            console.log("Decode error:", err.name);
+          }
+        }
+
+        // Continue scanning
+        if (streamRef.current?.active) {
+          requestAnimationFrame(decodeLoop);
+        }
+      };
+
+      // Start the decode loop
+      decodeLoop();
     } catch (err: any) {
-      console.error("Error starting scanner:", err);
-      setError(`Failed to start: ${err.message || err}`);
+      console.error("Start error:", err);
+      setError(err.message || "Failed to start scanner");
       setDebugInfo(`Start error: ${err.message}`);
-      onScanError?.(`Failed to start scanner: ${err}`);
+      onScanError?.(err.message);
+
+      // Try fallback for iOS - use facingMode without exact
+      if (isIOSDevice && err.name === "OverconstrainedError") {
+        setDebugInfo("Trying fallback constraints...");
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "environment" },
+          });
+          streamRef.current = fallbackStream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = fallbackStream;
+            await videoRef.current.play();
+            setIsScanning(true);
+            setError(null);
+          }
+        } catch (fallbackErr) {
+          console.error("Fallback failed:", fallbackErr);
+        }
+      }
     }
   }, [selectedCamera, onScanSuccess, onScanError, isIOSDevice]);
 
-  const stopScanner = useCallback(async () => {
-    if (scannerRef.current) {
-      try {
-        if (scannerRef.current.isScanning) {
-          await scannerRef.current.stop();
-        }
-        scannerRef.current.clear();
-      } catch (err) {
-        console.error("Error stopping scanner:", err);
-      }
-      setIsScanning(false);
-      setDebugInfo("Scanner stopped");
+  const stopScanner = useCallback(() => {
+    // Stop stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
-  }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (scannerRef.current?.isScanning) {
-        scannerRef.current.stop().catch(console.error);
-      }
-    };
+    // Reset reader
+    if (readerRef.current) {
+      readerRef.current.reset();
+      readerRef.current = null;
+    }
+
+    // Clear video
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setIsScanning(false);
+    setDebugInfo("Scanner stopped");
   }, []);
 
   if (hasPermission === null) {
@@ -249,7 +249,8 @@ export default function BarcodeScanner({
         <button
           onClick={() => {
             setHasPermission(null);
-            requestCameraPermission();
+            setError(null);
+            initializeScanner();
           }}
           className="mt-4 px-4 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600"
         >
@@ -261,12 +262,11 @@ export default function BarcodeScanner({
 
   return (
     <div className="space-y-4">
-      {/* Debug Info (can remove in production) */}
+      {/* Debug Info */}
       <div className="bg-gray-100 rounded-lg p-2 text-xs font-mono text-gray-600 break-all">
         <strong>Debug:</strong> {debugInfo}
         <br />
-        <strong>Device:</strong> {isIOSDevice ? "iOS" : "Other"} | Camera:{" "}
-        {selectedCamera?.substring(0, 20)}...
+        <strong>Device:</strong> {isIOSDevice ? "iOS" : "Other"} | Lib: ZXing
       </div>
 
       {/* Error Display */}
@@ -276,8 +276,8 @@ export default function BarcodeScanner({
         </div>
       )}
 
-      {/* Camera Selection - Only show on non-iOS or when not scanning */}
-      {cameras.length > 1 && !isScanning && !isIOSDevice && (
+      {/* Camera Selection */}
+      {cameras.length > 1 && !isScanning && (
         <div className="flex items-center gap-3">
           <label className="text-sm font-medium text-gray-700">Camera:</label>
           <select
@@ -286,26 +286,50 @@ export default function BarcodeScanner({
             className="flex-1 px-3 py-2 border rounded-lg bg-white"
           >
             {cameras.map((camera) => (
-              <option key={camera.id} value={camera.id}>
-                {camera.label || `Camera ${camera.id}`}
+              <option key={camera.deviceId} value={camera.deviceId}>
+                {camera.label || `Camera ${camera.deviceId.substring(0, 8)}`}
               </option>
             ))}
           </select>
         </div>
       )}
 
-      {/* Scanner Container */}
+      {/* Video Container */}
       <div
-        ref={containerRef}
         className="relative bg-black rounded-xl overflow-hidden"
         style={{ minHeight: "350px" }}
       >
-        <div
-          id="barcode-reader"
-          className="w-full"
+        <video
+          ref={videoRef}
+          className="w-full h-full object-cover"
           style={{ minHeight: "350px" }}
-        ></div>
+          playsInline
+          muted
+          autoPlay
+        />
 
+        {/* Scanning overlay */}
+        {isScanning && (
+          <div className="absolute inset-0 pointer-events-none">
+            {/* Scan frame */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="w-4/5 h-24 border-2 border-green-400 rounded-lg relative">
+                {/* Scanning line animation */}
+                <div
+                  className="absolute inset-x-0 top-0 h-0.5 bg-green-400 animate-pulse"
+                  style={{ animation: "scanLine 2s linear infinite" }}
+                />
+                {/* Corner markers */}
+                <div className="absolute top-0 left-0 w-4 h-4 border-t-4 border-l-4 border-green-400 rounded-tl" />
+                <div className="absolute top-0 right-0 w-4 h-4 border-t-4 border-r-4 border-green-400 rounded-tr" />
+                <div className="absolute bottom-0 left-0 w-4 h-4 border-b-4 border-l-4 border-green-400 rounded-bl" />
+                <div className="absolute bottom-0 right-0 w-4 h-4 border-b-4 border-r-4 border-green-400 rounded-br" />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Placeholder when not scanning */}
         {!isScanning && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
             <div className="text-center text-white">
@@ -321,39 +345,39 @@ export default function BarcodeScanner({
         {!isScanning ? (
           <button
             onClick={startScanner}
-            className="flex-1 py-4 px-6 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold rounded-xl text-lg active:scale-95"
+            className="flex-1 py-4 px-6 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold rounded-xl text-lg active:scale-95 transition-transform"
           >
             🎯 Start Scanning
           </button>
         ) : (
           <button
             onClick={stopScanner}
-            className="flex-1 py-4 px-6 bg-gradient-to-r from-red-500 to-rose-600 text-white font-semibold rounded-xl text-lg active:scale-95"
+            className="flex-1 py-4 px-6 bg-gradient-to-r from-red-500 to-rose-600 text-white font-semibold rounded-xl text-lg active:scale-95 transition-transform"
           >
             ⏹️ Stop Scanning
           </button>
         )}
       </div>
 
-      {/* Scanning Indicator */}
+      {/* Scanning status */}
       {isScanning && (
         <div className="flex items-center justify-center gap-2 text-green-600">
           <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
           <span className="text-sm font-medium">
-            Scanning... Hold barcode steady in frame
+            Scanning with ZXing... Hold barcode steady
           </span>
         </div>
       )}
 
-      {/* iOS Tips */}
-      {isIOSDevice && isScanning && (
+      {/* Tips */}
+      {isScanning && (
         <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700">
-          <strong>📱 iOS Tips:</strong>
+          <strong>� Tips:</strong>
           <ul className="list-disc ml-4 mt-1">
             <li>Hold phone 6-12 inches from barcode</li>
             <li>Ensure good lighting</li>
-            <li>Keep camera steady, let it focus</li>
-            <li>Try tilting slightly if not detecting</li>
+            <li>Keep barcode centered in frame</li>
+            <li>Hold steady and let camera focus</li>
           </ul>
         </div>
       )}
